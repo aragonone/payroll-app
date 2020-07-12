@@ -8,7 +8,7 @@ This app is not actively maintained and does not contain a working frontend.
 
 ## 🚨 Security review status: audited
 
-The `Payroll` contract was [last professionally audited in 2019-09](./AUDIT.md).
+The `Payroll` contract was [last professionally audited in 2019-07](./AUDIT.md).
 
 This version was published to aragonPM as `payroll.aragonpm.eth`.
 
