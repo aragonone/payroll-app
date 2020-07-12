@@ -2,9 +2,9 @@
 
 Payroll is an Aragon app implementing an automated employee payroll mechanism, featuring real-time salaries in multiple currencies.
 
-## ⚠️  Maintenance status:
+## ⚠️  Maintenance status: not actively maintained
 
-This app is not actively maintained and does not contain a working frontend.
+This app's frontend is currently unfinished, and is not available for use.
 
 ## 🚨 Security review status: audited
 
