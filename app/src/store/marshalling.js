@@ -1,14 +1,12 @@
-export function currency(value) {
-  return parseInt(value || 0)
-}
-
-export function date(epoch) {
-  const epochInt = parseInt(epoch)
-  if (!epoch || !Number.isSafeInteger(epochInt)) {
+export function time(solidityTime) {
+  // Represent time values as real numbers, as it's very unlikely they'll hit the limit...
+  const time = parseInt(solidityTime, 10)
+  if (!solidityTime || !Number.isSafeInteger(time)) {
     return null
   }
 
-  return epochInt * 1000
+  // Adjust for js time (in ms vs s)
+  return time * 1000
 }
 
 export function employee(data) {

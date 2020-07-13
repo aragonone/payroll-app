@@ -1,23 +1,18 @@
 import app from './store/app'
 import initialize from './store'
-import financeAbi from './abi/finance-vault'
 
 retryEvery(async retry => {
-  const financeAddress = await app
-    .call('finance')
-    .first()
-    .toPromise()
+  try {
+    const hasInitialized = await app.call('hasInitialized').toPromise()
+    if (!hasInitialized) {
+      throw new Error('Payroll instance has not been initialized yet')
+    }
 
-  const vaultAddress = await app
-    .external(financeAddress, financeAbi)
-    .vault()
-    .first()
-    .toPromise()
-
-  initialize(financeAddress, vaultAddress).catch(err => {
-    console.error('Could not start background script execution due:', err)
+    initialize()
+  } catch (err) {
+    console.error('Could not start background script execution due to:', err)
     retry()
-  })
+  }
 })
 
 /*

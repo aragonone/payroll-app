@@ -1,27 +1,41 @@
-import { of } from '../rxjs'
-
+import { of } from 'rxjs'
+import FINANCE_VAULT_ABI from '../abi/finance-vault'
+import { addressesEqual } from '../utils/web3'
 import app from './app'
-import Event from './events'
-import { getAccountAddress } from './account'
 import {
   getEmployeeById,
-  getEmployeeIdByAddress,
+  getEmployeeByAddress,
   getSalaryAllocation,
 } from './employees'
-import { getDenominationToken, getToken } from './tokens'
-import { date, payment } from './marshalling'
-// import financeEvents from '../abi/finance-events'
+import { getTokenDetails } from './tokens'
+import { payment, time } from './marshalling'
 
-export default function configureStore(financeAddress, vaultAddress) {
-  // const financeApp = app.external(financeAddress, financeEvents)
+const INITIALIZATION_TRIGGER = Symbol('INITIALIZATION_TRIGGER')
 
+const EVENT_MAPPING = {
+  INITIALIZATION_TRIGGER: onInit,
+  AddEmployee: onAddEmployee,
+  TerminateEmployee: onTerminateEmployee,
+  SetEmployeeSalary: onSetEmployeeSalary,
+  AddEmployeeAccruedSalary: onAddEmployeeAccruedSalary,
+  AddEmployeeBonus: onAddEmployeeBonus,
+  AddEmployeeReimbursement: onAddEmployeeReimbursement,
+  ChangeAddressByEmployee: onChangeAddressByEmployee,
+  DetermineAllocation: onDetermineAllocation,
+  SendPayment: onSendPayroll,
+  AddAllowedToken: onAddAllowedToken,
+  SetPriceFeed: onSetPriceFeed,
+  SetRateExpiryTime: onSetRateExpiryTime,
+}
+
+export default function initialize() {
   return app.store(
-    async (state, { event, ...data }) => {
-      const eventType = Event[event] || event
-      const eventProcessor = eventMapping[eventType] || (state => state)
+    async (state, eventData) => {
+      const { event } = eventData
+      const eventProcessor = (event && EVENT_MAPPING[event]) || (state => state)
 
       try {
-        const newState = await eventProcessor({ ...state }, data)
+        const newState = await eventProcessor({ ...state }, eventData)
 
         return newState
       } catch (err) {
@@ -30,111 +44,86 @@ export default function configureStore(financeAddress, vaultAddress) {
 
       return state
     },
-    [
-      of({ event: Event.Init, vaultAddress }),
-
-      // Handle account change
-      app.accounts().map(([accountAddress]) => {
-        return {
-          event: Event.AccountChange,
-          accountAddress,
-        }
-      }),
-      // ,
-
-      // Handle Finance eventes
-      // financeApp.events()
-    ]
+    [of({ event: INITIALIZATION_TRIGGER })]
   )
 }
 
-const eventMapping = {
-  [Event.Init]: onInit,
-  [Event.AccountChange]: onChangeAccount,
-  [Event.SetAllowedToken]: onSetAllowedToken,
-  [Event.AddEmployee]: onAddNewEmployee,
-  [Event.ChangeAddressByEmployee]: onChangeEmployeeAddress,
-  [Event.DetermineAllocation]: onChangeSalaryAllocation,
-  [Event.SetPriceFeed]: onSetPriceFeed,
-  [Event.SendPayroll]: onSendPayroll,
-  [Event.SetEmployeeSalary]: onSetEmployeeSalary,
-  [Event.AddEmployeeAccruedValue]: onAddEmployeeAccruedValue,
-  [Event.TerminateEmployee]: onTerminateEmployee,
-}
+async function onInit(state) {
+  const financeAddress = await app.call('finance').toPromise()
+  const denominationTokenAddress = await app
+    .call('denominationToken')
+    .toPromise()
+  const priceFeedAddress = await app.call('feed').toPromise()
+  const rateExpiryTime = await app.call('rateExpiryTime').toPromise()
 
-async function onInit(state, { vaultAddress }) {
-  const [accountAddress, denominationToken, network] = await Promise.all([
-    getAccountAddress(),
-    getDenominationToken(),
-    app
-      .network()
-      .take(1)
-      .toPromise(),
-  ])
+  const vaultAddress = await app
+    .external(financeAddress, FINANCE_VAULT_ABI)
+    .vault()
+    .toPromise()
+  const denominationToken = await getTokenDetails(denominationTokenAddress)
 
-  return { ...state, vaultAddress, accountAddress, denominationToken, network }
-}
-
-async function onChangeAccount(state, event) {
-  const { accountAddress } = event
-  const { tokens = [], employees = [] } = state
-  let salaryAllocation = []
-
-  const employee = employees.find(
-    employee => employee.accountAddress === accountAddress
-  )
-
-  if (employee) {
-    salaryAllocation = await getSalaryAllocation(employee.id, tokens)
+  return {
+    ...state,
+    financeAddress,
+    vaultAddress,
+    denominationToken,
+    priceFeedAddress,
+    rateExpiryTime: time(rateExpiryTime),
   }
-
-  return { ...state, accountAddress, salaryAllocation }
 }
 
-async function onSetAllowedToken(state, event) {
-  const {
-    returnValues: { token: tokenAddress, allowed },
-  } = event
-  const { tokens = [] } = state
-
-  const foundToken = tokens.find(t => t.address === tokenAddress)
-
-  if (foundToken && !allowed) {
-    tokens.splice(tokens.indexOf(foundToken), 1)
-  } else if (!foundToken && allowed) {
-    const token = await getToken(tokenAddress)
-
-    if (token) {
-      tokens.push(token)
+// Employee-related handlers
+async function onAddEmployee(state, event) {
+  const transform = (employees, employeeIndex, employee) => {
+    if (employeeIndex === -1) {
+      employees.push(employee)
+    } else {
+      employees[employeeIndex] = {
+        ...employees[employeeIndex],
+        ...employee,
+      }
     }
   }
 
-  return { ...state, tokens }
-}
-
-async function onAddNewEmployee(state, event) {
-  const {
-    returnValues: { employeeId, name, role, startDate },
-  } = event
-  const { employees = [] } = state
-
-  if (!employees.find(e => e.id === employeeId)) {
-    const newEmployee = await getEmployeeById(employeeId)
-
-    if (newEmployee) {
-      employees.push({
-        ...newEmployee,
-        name: name,
-        role: role,
-        startDate: date(startDate),
-      })
-    }
-  }
+  const employees = updateEmployees(state, event, transform)
 
   return { ...state, employees }
 }
 
-async function onChangeEmployeeAddress(state, event) {
+async function onTerminateEmployee(state, event) {
+  const { employeeId, ...newDataForEmployee } = event.returnValues
+
+  const employees = updateEmployees(
+    state.employees,
+    employeeId,
+    newDataForEmployee,
+    (employees, employeeIndex, employee) => {
+      if (employeeIndex === -1) {
+        employees.push(employee)
+      } else {
+        employees[employeeIndex] = {
+          ...employees[employeeIndex],
+          ...employee,
+        }
+      }
+    }
+  )
+  const employeeIndex = emp
+  const employees = await updateEmployeeById(state, event)
+  return { ...state, employees }
+}
+
+async function onSetEmployeeSalary(state, event) {
+  const employees = await updateEmployeeById(state, event)
+  return { ...state, employees }
+}
+
+async function onAddEmployeeAccruedSalary(state, event) {
+  const employees = await updateEmployeeById(state, event)
+  return { ...state, employees }
+}
+
+async function onChangeAddressByEmployee(state, event) {
   const {
     returnValues: { newAddress: accountAddress },
   } = event
@@ -152,7 +141,7 @@ async function onChangeEmployeeAddress(state, event) {
   return { ...state, accountAddress, salaryAllocation }
 }
 
-async function onChangeSalaryAllocation(state, event) {
+async function onDetermineAllocation(state, event) {
   const {
     returnValues: { employee: accountAddress },
   } = event
@@ -168,14 +157,6 @@ async function onChangeSalaryAllocation(state, event) {
   }
 
   return { ...state, salaryAllocation }
-}
-
-function onSetPriceFeed(state, event) {
-  const {
-    returnValues: { feed: priceFeedAddress },
-  } = event
-
-  return { ...state, priceFeedAddress }
 }
 
 async function onSendPayroll(state, event) {
@@ -203,17 +184,54 @@ async function onSendPayroll(state, event) {
   return { ...state, employees, payments }
 }
 
-async function onSetEmployeeSalary(state, event) {
-  const employees = await updateEmployeeById(state, event)
-  return { ...state, employees }
+// Management-related handlers
+async function onAddAllowedToken(
+  state,
+  { returnValues: { token: newTokenAddress } }
+) {
+  const { allowedTokens = [] } = state
+
+  if (
+    !allowedTokens.find(({ address }) =>
+      addressesEqual(address, newTokenAddress)
+    )
+  ) {
+    const newAllowedToken = await getTokenDetails(newTokenAddress)
+
+    if (newAllowedToken) {
+      return { ...state, allowedTokens: allowedTokens.concat(newAllowedToken) }
+    }
+  }
+
+  return state
 }
-async function onAddEmployeeAccruedValue(state, event) {
-  const employees = await updateEmployeeById(state, event)
-  return { ...state, employees }
+
+async function onSetPriceFeed(state, event) {
+  const priceFeedAddress = await app.call('feed').toPromise()
+  return { ...state, priceFeedAddress }
 }
-async function onTerminateEmployee(state, event) {
-  const employees = await updateEmployeeById(state, event)
-  return { ...state, employees }
+
+async function onSetRateExpiryTime(state, event) {
+  const rateExpiryTime = time(await app.call('rateExpiryTime').toPromise())
+
+  return { ...state, rateExpiryTime }
+}
+
+// Utilities
+async function updateEmployees(
+  state,
+  { employeeId, ...newEmployeeData },
+  transform
+) {
+  const nextEmployees = Array.isArray(employees) ? Array.from(employees) : []
+
+  const employeeIndex = nextEmployees.findIndex(
+    e => e.employeeId === employeeId
+  )
+  // TODO: make sure fetch update only includes changed keys (fetches from chain only if not removed)
+  const updatedEmployee = fetchEmployeeUpdate(employeeId, newDataForEmployee)
+
+  return transform(nextEmployees, updatedEmployee)
 }
 
 async function updateEmployeeByAddress(state, event) {
@@ -221,11 +239,10 @@ async function updateEmployeeByAddress(state, event) {
     returnValues: { employee: employeeAddress },
   } = event
   const { employees: prevEmployees } = state
-  const { id: employeeId } = await getEmployeeIdByAddress(employeeAddress)
-  const employeeData = await getEmployeeById(employeeId)
+  const employeeData = await getEmployeeByAddress(employeeAddress)
 
-  const byId = employee => employee.id === employeeId
-  return updateEmployeeBy(prevEmployees, employeeData, byId)
+  const byAddress = employee => employee.accountAddress === employeeAddress
+  return updateEmployeeBy(prevEmployees, employeeData, byAddress)
 }
 
 async function updateEmployeeById(state, event) {
